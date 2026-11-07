@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>gari</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script type="module" src="./main.ts"></script>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>gari</h1>
+        <p id="subtitle" class="muted">Loading…</p>
+      </div>
+      <div class="actions">
+        <button id="scan" class="primary">Scan</button>
+        <button id="clean" disabled>Clean selected</button>
+      </div>
+    </header>
+
+    <section id="categories" aria-label="What to clean"></section>
+
+    <section id="status" hidden>
+      <div class="status-line">
+        <span id="step">Idle</span>
+        <span id="freed"></span>
+      </div>
+      <progress id="progress" max="1" value="0"></progress>
+      <pre id="log" aria-live="polite"></pre>
+    </section>
+
+    <footer>
+      <span id="last-run" class="muted"></span>
+      <button id="sparse" class="link" title="One-time: lets the WSL disk shrink on its own (restarts WSL, asks for admin)">Enable auto-shrink for WSL disk</button>
+    </footer>
+  </body>
+</html>
