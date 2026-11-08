@@ -1,0 +1,5 @@
+# Scripts are embedded into the binary with include_str!; a CRLF checkout on
+# Windows makes bash choke on \r. Keep them LF everywhere.
+*.sh  text eol=lf
+*.bats text eol=lf
+*.ps1 text eol=crlf

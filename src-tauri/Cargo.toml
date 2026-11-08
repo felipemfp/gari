@@ -1,0 +1,27 @@
+[package]
+name = "gari"
+version = "0.1.0"
+edition = "2024"
+description = "Free disk space on a Windows + WSL dev machine"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sysinfo = "0.40.1"
+tauri = { version = "2.12.5", features = ["tray-icon"] }
+tauri-plugin-notification = "2.8.0"
+
+[build-dependencies]
+tauri-build = "2.7.4"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lib]
+name = "gari_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[profile.release]
+strip = true
+lto = true

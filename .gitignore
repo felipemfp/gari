@@ -1,0 +1,7 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+# Generated from icons/icon.svg by `npx tauri icon` (CI does the same); no binaries in git.
+src-tauri/icons/*
+!src-tauri/icons/icon.svg
