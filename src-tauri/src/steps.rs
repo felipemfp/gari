@@ -247,6 +247,13 @@ fn elevated(
 
 #[cfg(test)]
 mod tests {
+    // Regression: a Windows CI checkout with core.autocrlf turned gari.sh into CRLF,
+    // and bash in WSL failed on `set -euo pipefail\r`. .gitattributes pins LF.
+    #[test]
+    fn embedded_bash_script_has_lf_endings() {
+        assert!(!GARI_SH.contains('\r'), "scripts/gari.sh must be LF (see .gitattributes)");
+    }
+
     use super::*;
 
     fn env(root: &Path) -> Env {
