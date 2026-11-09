@@ -167,7 +167,7 @@ run() { # cmd category [list]
   fn=$fn${cat//-/_}
   if [ "$cmd" = clean ]; then
     LIST=${3:-}
-    case $LIST in *\\*) LIST=$(wslpath -u "$LIST") ;; esac
+    case $LIST in *\\* | [A-Za-z]:/*) LIST=$(wslpath -u "$LIST") ;; esac
     [ -f "$LIST" ] || { echo "clean needs the scanned list file" >&2; return 2; }
   fi
   # stderr of the generators carries log events (and stray tool noise); fold it in.

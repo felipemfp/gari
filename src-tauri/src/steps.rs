@@ -108,7 +108,9 @@ fn wsl_command(env: &Env, mode: Mode, cat: Category, list: Option<&Path>) -> Com
     // Off Windows (development inside WSL) the script runs directly.
     let mut c = if cfg!(windows) {
         let mut c = Command::new("wsl.exe");
-        c.args(["-d", &env.distro, "--"]);
+        // --exec, not --: `--` hands the line to the login shell, which eats the
+        // backslashes in the list path (C:\Users\... -> C:Users...) and splits on spaces.
+        c.args(["-d", &env.distro, "--exec"]);
         c
     } else {
         Command::new("env")
@@ -116,9 +118,15 @@ fn wsl_command(env: &Env, mode: Mode, cat: Category, list: Option<&Path>) -> Com
     c.args(["bash", "-s", "--", mode.as_str(), cat.id()]);
     // A Windows path; the script converts it with wslpath.
     if let Some(l) = list {
-        c.arg(l);
+        c.arg(list_arg(l));
     }
     c
+}
+
+/// Forward slashes survive any shell in between; the script hands
+/// drive paths (`C:/...`) to wslpath.
+fn list_arg(p: &Path) -> String {
+    p.display().to_string().replace('\\', "/")
 }
 
 /// Default distro name, asked from WSL itself so the registry layout does not matter.
@@ -249,6 +257,15 @@ fn elevated(
 mod tests {
     // Regression: a Windows CI checkout with core.autocrlf turned gari.sh into CRLF,
     // and bash in WSL failed on `set -euo pipefail\r`. .gitattributes pins LF.
+    // Regression: the list path reached bash as `C:UsersfelipAppData...`.
+    #[test]
+    fn list_path_is_passed_with_forward_slashes() {
+        assert_eq!(
+            list_arg(Path::new(r"C:\Users\Jane Doe\AppData\Local\gari\clean-caches.txt")),
+            "C:/Users/Jane Doe/AppData/Local/gari/clean-caches.txt"
+        );
+    }
+
     #[test]
     fn embedded_bash_script_has_lf_endings() {
         assert!(!GARI_SH.contains('\r'), "scripts/gari.sh must be LF (see .gitattributes)");

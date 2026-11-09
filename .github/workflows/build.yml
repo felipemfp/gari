@@ -53,6 +53,16 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\vhdx.ps1 -Mode compact -Distro NoSuchDistro -Log $log -List "$env:RUNNER_TEMP\missing.txt"
           Get-Content $log
           if (-not (Select-String -Path $log -Pattern 'nothing was shut down' -Quiet)) { throw 'compact without a list must not shut anything down' }
+          # A sparse disk (auto-shrink on) cannot be compacted: skip it, shut nothing down.
+          $vhd = Join-Path $env:RUNNER_TEMP 'sparse.vhdx'
+          Set-Content -LiteralPath $vhd -Value 'x'
+          fsutil sparse setflag $vhd | Out-Null
+          Set-Content -LiteralPath "$env:RUNNER_TEMP\list.txt" -Value $vhd
+          $log2 = Join-Path $env:RUNNER_TEMP 's.log'
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\vhdx.ps1 -Mode compact -Distro NoSuchDistro -Log $log2 -List "$env:RUNNER_TEMP\list.txt"
+          Get-Content $log2
+          if (-not (Select-String -Path $log2 -Pattern 'is sparse' -Quiet)) { throw 'sparse disk was not skipped' }
+          if (-not (Select-String -Path $log2 -Pattern 'nothing was shut down' -Quiet)) { throw 'only sparse disks listed must not shut anything down' }
       # Rust unit tests on the real target (wincache, history, event parsing).
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: npx tauri build
