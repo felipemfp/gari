@@ -69,9 +69,16 @@ function Get-UsedBytes($name) {
   return $null
 }
 
+function Test-Sparse($path) {
+  # Optimize-VHD and diskpart refuse sparse disks ("must not be sparse"). A sparse
+  # distro disk (Enable auto-shrink) already hands space back on its own.
+  [bool]((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::SparseFile)
+}
+
 function Invoke-Scan {
   $total = 0; $count = 0
   foreach ($t in Get-Targets) {
+    if (Test-Sparse $t.path) { Out-Log "$($t.path) is sparse (auto-shrink); skipping"; continue }
     $size = (Get-Item -LiteralPath $t.path).Length
     $used = Get-UsedBytes $t.name
     $reclaim = if ($null -ne $used -and $size -gt $used) { $size - $used } else { 0 }
@@ -104,7 +111,12 @@ function Compress-Vhdx($path) {
 function Invoke-Compact {
   $paths = @()
   if ($List -and (Test-Path -LiteralPath $List)) {
-    $paths = @(Get-Content -LiteralPath $List | Where-Object { $_ -and $_.EndsWith('.vhdx') -and (Test-Path -LiteralPath $_) })
+    $paths = @(Get-Content -LiteralPath $List | ForEach-Object { [string]$_ } |
+      Where-Object { $_ -and $_.EndsWith('.vhdx') -and (Test-Path -LiteralPath $_) })
+    # Plain strings: Get-Content lines carry PSPath etc., which ConvertTo-Json would dump.
+    $sparse = @($paths | Where-Object { Test-Sparse $_ })
+    foreach ($p in $sparse) { Out-Log "$p is sparse (auto-shrink) and cannot be compacted; skipping" }
+    $paths = @($paths | Where-Object { $sparse -notcontains $_ })
   }
   if (-not $paths) {
     Out-Log 'no scanned .vhdx files to compact; nothing was shut down'
