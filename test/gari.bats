@@ -414,11 +414,16 @@ mkenv() { # name project-dir-or-empty -> env dir; records the editable install l
 @test "caches: an older VS Code build a running process uses is kept" {
   b="$HOME/.vscode-server/bin"
   mkdir -p "$b/old" "$b/new"
-  touch -d '30 days ago' "$b/old"
-  printf '#!/bin/sh\nsleep 30\n' > "$b/old/server.sh"; chmod +x "$b/old/server.sh"
-  "$b/old/server.sh" & pid=$!
+  # Times last: writing into a dir bumps its mtime.
+  touch -d '30 days ago' "$b/old"; touch "$b/new"
+  # A process whose command line names the old build (as a VS Code server's does).
+  # exec -a: `sleep` itself carries the path, so kill reaches it and bats does not wait.
+  bash -c 'exec -a "$0/node" sleep 30' "$b/old" & pid=$!
+  # The scan must not race the process into the process table.
+  for _ in $(seq 50); do ps -eo args= | grep -Fq "$b/old/node" && break; sleep 0.1; done
+  ps -eo args= | grep -Fq "$b/old/node"
   run paths scan caches item
-  kill "$pid" 2>/dev/null
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true   # 143: killed, as intended
   [ -z "$output" ]
 }
 
