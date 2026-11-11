@@ -67,3 +67,28 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); tex
 progress { width: 100%; height: 8px; accent-color: var(--accent); }
 #log { margin: 0; height: 140px; overflow: auto; font: 12px/1.4 Consolas, monospace; color: var(--muted); white-space: pre-wrap; }
 footer { margin-top: auto; display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+h2 { margin: 0; font-size: 17px; }
+h3 { margin: 12px 0 6px; font-size: 14px; }
+#report { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.report-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; margin-top: 10px; }
+.kpi { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+.kpi b { font-size: 18px; font-variant-numeric: tabular-nums; }
+.kpi span { font-size: 12px; }
+.kpi.bad b, .rec.high strong { color: var(--warn); }
+.meter { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--accent); }
+.kpi.bad .meter i { background: var(--warn); }
+.recs { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.rec { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+.rec .text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rec .text span { font-size: 12px; overflow-wrap: anywhere; }
+.rec .size { min-width: 70px; }
+.rec button { padding: 3px 10px; font-size: 12px; }
+#report-details details { margin-top: 6px; }
+#report-details summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+#report-details table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#report-details td { padding: 2px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+#report-details td:first-child { font-family: Consolas, monospace; overflow-wrap: anywhere; }
+#report-details td.n { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cat.flash { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }

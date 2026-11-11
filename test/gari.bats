@@ -22,6 +22,8 @@ setup() {
   export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/docker"; chmod +x "$BATS_TEST_TMPDIR/bin/docker"
+  # Only the fake: never Docker Desktop's docker.exe through WSL interop.
+  export GARI_DOCKER=docker
 }
 
 LIST="$BATS_TEST_TMPDIR/list"
@@ -217,10 +219,12 @@ echo "$*" >> "$HOME/docker.calls"
 case "$1" in
   info) exit 0 ;;
   system)
-    case "$2" in
-      df) printf 'Images\t1.5GB (40%%)\nContainers\t12.3kB (100%%)\nLocal Volumes\t9GB (100%%)\nBuild Cache\t0B\n' ;;
-      prune) printf 'Deleted Images:\nx\n\nTotal reclaimed space: 2.25GB\n' ;;
+    case "$2 $3" in
+      "df -v") cat "$HOME/volumes" 2>/dev/null ;;
+      df*) printf 'Images\t1.5GB (40%%)\nContainers\t12.3kB (100%%)\nLocal Volumes\t9GB (100%%)\nBuild Cache\t0B\n' ;;
+      prune*) printf 'Deleted Images:\nx\n\nTotal reclaimed space: 2.25GB\n' ;;
     esac ;;
+  volume) [ "$2" = rm ] && ! grep -qx "$3" "$HOME/busy" 2>/dev/null ;;
 esac
 EOF
   chmod +x "$BATS_TEST_TMPDIR/bin/docker"
@@ -255,6 +259,199 @@ EOF
   : > "$LIST"
   bash "$GARI" clean docker "$LIST" >/dev/null
   ! grep -q prune "$HOME/docker.calls"
+}
+
+@test "docker: falls back to the next CLI when the first cannot reach a daemon, CRs stripped" {
+  # WSL without Docker Desktop integration: no working `docker`, but docker.exe
+  # via interop works and prints CRLF.
+  fake_docker
+  mv "$BATS_TEST_TMPDIR/bin/docker" "$BATS_TEST_TMPDIR/bin/docker.exe"
+  printf '#!/bin/sh\nexec "%s" "$@" | sed "s/$/\\r/"\n' "$BATS_TEST_TMPDIR/bin/docker.exe" > "$BATS_TEST_TMPDIR/winexe"
+  chmod +x "$BATS_TEST_TMPDIR/winexe"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/docker"; chmod +x "$BATS_TEST_TMPDIR/bin/docker"
+  export GARI_DOCKER="docker
+$BATS_TEST_TMPDIR/winexe"
+  out=$(bash "$GARI" scan docker)
+  assert_json_lines "$out"
+  [ "$(echo "$out" | jq -r 'select(.event=="item" and .path=="docker: Images")|.bytes')" = 1500000000 ]
+}
+
+# ---- docker-volumes ---------------------------------------------------------
+
+ANON1=$(printf 'a%.0s' {1..64})
+ANON2=$(printf 'b%.0s' {1..64})
+ANON3=$(printf 'c%.0s' {1..64})
+
+fake_volumes() {
+  fake_docker
+  printf '%s\n' "$ANON1 0 1.5GB" "$ANON2 1 2GB" "pgdata 0 3GB" "$ANON3 0 52.05MB" > "$HOME/volumes"
+}
+
+@test "docker-volumes: only unreferenced anonymous volumes; named and in-use ones never" {
+  fake_volumes
+  run paths scan docker-volumes item
+  [ "$output" = "$(printf 'docker volume: %s\n' "$ANON1" "$ANON3" | sort)" ]
+}
+
+@test "docker-volumes: clean removes listed ones by name with volume rm, never prune" {
+  fake_volumes
+  scan_list docker-volumes >/dev/null
+  out=$(bash "$GARI" clean docker-volumes "$LIST")
+  grep -qx "volume rm $ANON1" "$HOME/docker.calls"
+  grep -qx "volume rm $ANON3" "$HOME/docker.calls"
+  ! grep -q 'prune' "$HOME/docker.calls"
+  ! grep -q 'pgdata' "$HOME/docker.calls"
+  [ "$(echo "$out" | jq -s '.[]|select(.event=="done")|.bytes')" = 1552050000 ]
+}
+
+@test "docker-volumes: a volume put back in use after the scan is skipped and logged" {
+  fake_volumes
+  scan_list docker-volumes >/dev/null
+  echo "$ANON1" > "$HOME/busy"   # docker refuses: a container started using it
+  out=$(bash "$GARI" clean docker-volumes "$LIST")
+  [ "$(echo "$out" | jq -r 'select(.event=="removed")|.path')" = "docker volume: $ANON3" ]
+  echo "$out" | jq -se 'any(.[]; .event=="log" and (.message|test("refused")))' >/dev/null
+}
+
+@test "docker-volumes: a volume not on the scanned list is not removed" {
+  fake_volumes
+  printf 'docker volume: %s\n' "$ANON3" > "$LIST"
+  bash "$GARI" clean docker-volumes "$LIST" >/dev/null
+  ! grep -q "volume rm $ANON1" "$HOME/docker.calls"
+}
+
+# ---- poetry-envs ------------------------------------------------------------
+
+ENVS() { echo "$HOME/.cache/pypoetry/virtualenvs"; }
+
+poetry_hash_py() { # reference: poetry's generate_env_name hash
+  python3 -c 'import base64,hashlib,os,sys; print(base64.urlsafe_b64encode(hashlib.sha256(os.path.realpath(sys.argv[1]).encode()).digest()).decode()[:8])' "$1"
+}
+
+mkenv() { # name project-dir-or-empty -> env dir; records the editable install like poetry
+  local e="$(ENVS)/$1"
+  mkdir -p "$e/lib/python3.12/site-packages/proj-0.1.dist-info"
+  [ -n "$2" ] && printf '{"dir_info": {"editable": true}, "url": "file://%s"}' "$2" \
+    > "$e/lib/python3.12/site-packages/proj-0.1.dist-info/direct_url.json"
+  echo "$e"
+}
+
+@test "poetry-envs: hash matches poetry's own generate_env_name" {
+  command -v python3 >/dev/null || skip "no python3"
+  mkdir -p "$GARI_ROOT/my app"
+  src=$(sed '/^# ---- main/,$d' "$GARI")
+  got=$(eval "$src"; poetry_hash "$GARI_ROOT/my app")
+  [ "$got" = "$(poetry_hash_py "$GARI_ROOT/my app")" ]
+}
+
+@test "poetry-envs: env of a deleted project is orphaned; live, unknown and unnamed ones are kept" {
+  command -v python3 >/dev/null || skip "no python3"
+  mkdir -p "$GARI_ROOT/live"; touch "$GARI_ROOT/live/pyproject.toml"
+  live=$(mkenv "live-$(poetry_hash_py "$GARI_ROOT/live")-py3.12" "$GARI_ROOT/live")
+  # its worktree was deleted: direct_url points nowhere
+  gone=$(mkenv "gone-AAAAAAAA-py3.12" "$HOME/.claude-worktrees/repo/abc/projects/gone")
+  # project outside the searched roots, still on disk: kept by its direct_url
+  mkdir -p "$BATS_TEST_TMPDIR/elsewhere/proj"
+  away=$(mkenv "away-BBBBBBBB-py3.12" "$BATS_TEST_TMPDIR/elsewhere/proj")
+  # no record of its project (--no-root), even untouched for 60 days: kept,
+  # a daily-used env writes nothing near its top level
+  norec=$(mkenv "norec-DDDDDDDD-py3.12" ""); age "$norec"
+  # not poetry's naming: never ours
+  odd=$(mkenv "custom-env" "$HOME/nowhere"); age "$odd"
+  run paths scan poetry-envs item
+  [ "$output" = "$gone" ]
+}
+
+@test "poetry-envs: an env with one path dependency still on disk is kept" {
+  e=$(mkenv "multi-EEEEEEEE-py3.12" "$HOME/gone/app")
+  mkdir -p "$GARI_ROOT/libs/shared" "$e/lib/python3.12/site-packages/shared-0.1.dist-info"
+  printf '{"url": "file://%s"}' "$GARI_ROOT/libs/shared" > "$e/lib/python3.12/site-packages/shared-0.1.dist-info/direct_url.json"
+  run paths scan poetry-envs item
+  [ -z "$output" ]
+}
+
+@test "poetry-envs: projects inside worktrees outside GARI_ROOT count as live" {
+  command -v python3 >/dev/null || skip "no python3"
+  make_repo
+  add_wt feat
+  # too deep for the shallow $HOME search; only found through `git worktree list`
+  mkdir -p "$WT/feat/projects/svc"; touch "$WT/feat/projects/svc/pyproject.toml"
+  # its install record points somewhere gone, so only the hash can keep it
+  e=$(mkenv "svc-$(poetry_hash_py "$WT/feat/projects/svc")-py3.12" "$HOME/gone/svc")
+  run paths scan poetry-envs item
+  [ -z "$output" ]
+}
+
+@test "poetry-envs: clean removes the listed orphan only" {
+  a=$(mkenv "a-AAAAAAAA-py3.12" "$HOME/gone/a")
+  b=$(mkenv "b-BBBBBBBB-py3.12" "$HOME/gone/b")
+  printf '%s\n' "$a" > "$LIST"
+  removed=$(paths clean poetry-envs removed)
+  [ "$removed" = "$a" ]
+  [ ! -e "$a" ]
+  [ -d "$b" ]
+}
+
+# ---- caches: tool caches and VS Code servers ---------------------------------
+
+@test "caches: tool caches are listed when present" {
+  mkdir -p "$HOME/.bun/install/cache" "$HOME/.cache/ms-playwright" "$HOME/.cache/pypoetry/artifacts" \
+           "$HOME/.cache/pypoetry/virtualenvs/x"
+  run paths scan caches item
+  [ "$output" = "$(printf '%s\n' "$HOME/.bun/install/cache" "$HOME/.cache/ms-playwright" \
+      "$HOME/.cache/pypoetry/artifacts" | sort)" ]
+}
+
+@test "caches: older VS Code server builds go, the newest stays" {
+  b="$HOME/.vscode-server/bin"
+  mkdir -p "$b/old1" "$b/old2" "$b/new"
+  touch -d '30 days ago' "$b/old1"; touch -d '10 days ago' "$b/old2"; touch "$b/new"
+  touch "$HOME/.vscode-server/bin/stray-file"
+  run paths scan caches item
+  [ "$output" = "$(printf '%s\n' "$b/old1" "$b/old2" | sort)" ]
+}
+
+@test "caches: an older VS Code build a running process uses is kept" {
+  b="$HOME/.vscode-server/bin"
+  mkdir -p "$b/old" "$b/new"
+  # Times last: writing into a dir bumps its mtime.
+  touch -d '30 days ago' "$b/old"; touch "$b/new"
+  # A process whose command line names the old build (as a VS Code server's does).
+  # exec -a: `sleep` itself carries the path, so kill reaches it and bats does not wait.
+  bash -c 'exec -a "$0/node" sleep 30' "$b/old" & pid=$!
+  # The scan must not race the process into the process table.
+  for _ in $(seq 50); do ps -eo args= | grep -Fq "$b/old/node" && break; sleep 0.1; done
+  ps -eo args= | grep -Fq "$b/old/node"
+  run paths scan caches item
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true   # 143: killed, as intended
+  [ -z "$output" ]
+}
+
+# ---- report -----------------------------------------------------------------
+
+@test "report: one JSON object per line, measurements present, exactly one done" {
+  mkdir -p "$HOME/.cache/pip" "$HOME/.claude-worktrees/r/abc"
+  head -c 10000 /dev/zero > "$HOME/.cache/pip/f"
+  out=$(bash "$GARI" report)
+  assert_json_lines "$out"
+  [ "$(echo "$out" | jq -s '[.[]|select(.event=="done")]|length')" = 1 ]
+  for sec in wsl-df wsl-home wsl-cache wsl-worktrees clean-caches poetry clean-stale-deps clean-worktrees; do
+    echo "$out" | jq -se --arg s "$sec" 'any(.[]; .event=="stat" and .section==$s)' >/dev/null || { echo "missing $sec"; return 1; }
+  done
+  [ "$(echo "$out" | jq -r 'select(.section=="clean-caches")|.bytes')" -ge 10000 ]
+}
+
+@test "report: docker volumes split anonymous vs named, with names" {
+  fake_volumes
+  out=$(bash "$GARI" report)
+  [ "$(echo "$out" | jq -r 'select(.section=="docker-volumes" and .label=="anonymous")|"\(.bytes) \(.data.count)"')" = "1552050000 2" ]
+  [ "$(echo "$out" | jq -c 'select(.section=="docker-volumes" and .label=="named")|.data.names')" = '["pgdata"]' ]
+}
+
+@test "report: docker down is logged, not fatal" {
+  out=$(bash "$GARI" report)
+  echo "$out" | jq -se 'any(.[]; .event=="log" and (.message|test("docker")))' >/dev/null
+  echo "$out" | tail -1 | jq -e '.event=="done" and .category=="report-wsl"' >/dev/null
 }
 
 # ---- clean only what the user saw --------------------------------------------

@@ -8,7 +8,9 @@ pub enum Category {
     Worktrees,
     Caches,
     StaleDeps,
+    PoetryEnvs,
     Docker,
+    DockerVolumes,
     WinCaches,
     Vhdx,
 }
@@ -30,15 +32,19 @@ pub struct Info {
     pub detail: &'static str,
     /// Cleaning this restarts WSL and Docker Desktop and asks for admin.
     pub disruptive: bool,
+    /// Deletes something that cannot be re-downloaded; never ticked by default.
+    pub opt_in: bool,
 }
 
 // Order is the clean order: free space inside the virtual disks first, then
 // compact them, so compaction gets to return what the other steps freed.
-pub const ALL: [Category; 6] = [
+pub const ALL: [Category; 8] = [
     Category::Worktrees,
     Category::Caches,
     Category::StaleDeps,
+    Category::PoetryEnvs,
     Category::Docker,
+    Category::DockerVolumes,
     Category::WinCaches,
     Category::Vhdx,
 ];
@@ -49,7 +55,9 @@ impl Category {
             Category::Worktrees => "worktrees",
             Category::Caches => "caches",
             Category::StaleDeps => "stale-deps",
+            Category::PoetryEnvs => "poetry-envs",
             Category::Docker => "docker",
+            Category::DockerVolumes => "docker-volumes",
             Category::WinCaches => "win-caches",
             Category::Vhdx => "vhdx",
         }
@@ -76,15 +84,23 @@ impl Category {
             ),
             Category::Caches => (
                 "Package & Python caches",
-                "npm/pnpm/yarn/pip/uv caches, __pycache__, .pytest_cache, .mypy_cache, .ruff_cache",
+                "npm/pnpm/yarn/bun/pip/uv/poetry, Playwright/Cypress browsers, pre-commit, trivy, old VS Code servers, __pycache__ & co",
             ),
             Category::StaleDeps => (
                 "Stale node_modules / .venv",
                 "projects under ~/Workspace untouched for 30+ days",
             ),
+            Category::PoetryEnvs => (
+                "Orphaned Poetry virtualenvs",
+                "envs whose project folder is gone (e.g. deleted worktrees); poetry install rebuilds them",
+            ),
             Category::Docker => (
                 "Docker leftovers",
                 "unused images, stopped containers, build cache (volumes kept)",
+            ),
+            Category::DockerVolumes => (
+                "Orphaned Docker volumes",
+                "anonymous volumes no container uses; data in them is lost (named volumes kept)",
             ),
             Category::WinCaches => (
                 "Windows npm & pip caches",
@@ -100,6 +116,7 @@ impl Category {
             label,
             detail,
             disruptive: self == Category::Vhdx,
+            opt_in: self == Category::DockerVolumes,
         }
     }
 }
@@ -156,6 +173,12 @@ mod tests {
                 c.id()
             );
         }
+    }
+
+    #[test]
+    fn only_volume_removal_is_opt_in() {
+        let o: Vec<_> = ALL.into_iter().filter(|c| c.info().opt_in).collect();
+        assert_eq!(o, vec![Category::DockerVolumes]);
     }
 
     #[test]
