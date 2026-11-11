@@ -21,7 +21,7 @@ jobs:
       - run: npm ci
       - run: npx tauri icon src-tauri/icons/icon.svg -o src-tauri/icons
       - run: npx bats test
-      - run: node --test ui/model.test.ts
+      - run: node --test ui/model.test.ts ui/report.test.ts
       - run: npm run build
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
@@ -53,16 +53,21 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts\vhdx.ps1 -Mode compact -Distro NoSuchDistro -Log $log -List "$env:RUNNER_TEMP\missing.txt"
           Get-Content $log
           if (-not (Select-String -Path $log -Pattern 'nothing was shut down' -Quiet)) { throw 'compact without a list must not shut anything down' }
-          # A sparse disk (auto-shrink on) cannot be compacted: skip it, shut nothing down.
-          $vhd = Join-Path $env:RUNNER_TEMP 'sparse.vhdx'
-          Set-Content -LiteralPath $vhd -Value 'x'
-          fsutil sparse setflag $vhd | Out-Null
-          Set-Content -LiteralPath "$env:RUNNER_TEMP\list.txt" -Value $vhd
-          $log2 = Join-Path $env:RUNNER_TEMP 's.log'
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts\vhdx.ps1 -Mode compact -Distro NoSuchDistro -Log $log2 -List "$env:RUNNER_TEMP\list.txt"
-          Get-Content $log2
-          if (-not (Select-String -Path $log2 -Pattern 'is sparse' -Quiet)) { throw 'sparse disk was not skipped' }
-          if (-not (Select-String -Path $log2 -Pattern 'nothing was shut down' -Quiet)) { throw 'only sparse disks listed must not shut anything down' }
+          # trim without a list: one done, an empty follow-up list, so no elevated compaction.
+          $o = Join-Path $env:RUNNER_TEMP 'next.txt'
+          $out = powershell -NoProfile -ExecutionPolicy Bypass -File scripts\vhdx.ps1 -Mode trim -Distro NoSuchDistro -List "$env:RUNNER_TEMP\missing.txt" -Out $o
+          $out
+          $done = @($out | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.event -eq 'done' })
+          if ($done.Count -ne 1) { throw "trim: expected one done event, got $($done.Count)" }
+          if ((Get-Content -Raw $o).Trim()) { throw 'trim without a list must not ask for compaction' }
+          # report: parses, ends in one done, every line is JSON.
+          $out = powershell -NoProfile -ExecutionPolicy Bypass -File scripts\vhdx.ps1 -Mode report -Distro NoSuchDistro
+          $ev = @($out | ForEach-Object { $_ | ConvertFrom-Json })
+          if (@($ev | Where-Object { $_.event -eq 'done' }).Count -ne 1) { throw 'report: expected one done event' }
+          if (-not @($ev | Where-Object { $_.section -eq 'win-drive' })) { throw 'report: no drive stats' }
+      # Pure decisions (sparse gap, room to un-sparse, sizes) on Windows PowerShell 5.1.
+      - shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File test\vhdx.tests.ps1
       # Rust unit tests on the real target (wincache, history, event parsing).
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: npx tauri build

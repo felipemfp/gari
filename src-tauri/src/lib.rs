@@ -166,6 +166,48 @@ fn start(
     Ok(())
 }
 
+/// Read-only disk report. Streams `stat` events; the UI builds the report and
+/// its recommendations from them.
+#[tauri::command]
+fn report(app: AppHandle, state: tauri::State<State>) -> Result<(), String> {
+    let guard = claim(&state.busy)?;
+    let env = state.env.clone();
+    std::thread::spawn(move || {
+        let _guard = guard;
+        let sides = ["report-wsl", "report-win"];
+        let mut errors = vec![];
+        for (i, side) in sides.iter().enumerate() {
+            let _ = app.emit(
+                "gari://step",
+                Step {
+                    mode: "report",
+                    index: i,
+                    total: sides.len(),
+                    category: side,
+                },
+            );
+            steps::report(&env, side, &mut |e| {
+                if let Event::Done {
+                    error: Some(err), ..
+                } = &e
+                {
+                    errors.push(format!("{side}: {err}"));
+                }
+                let _ = app.emit("gari://event", e);
+            });
+        }
+        let _ = app.emit(
+            "gari://finished",
+            Finished {
+                mode: "report",
+                freed: 0,
+                errors,
+            },
+        );
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn enable_sparse(app: AppHandle, state: tauri::State<State>) -> Result<(), String> {
     let guard = claim(&state.busy)?;
@@ -254,6 +296,7 @@ pub fn run() {
             last_run,
             distro,
             start,
+            report,
             enable_sparse
         ])
         .setup(|app| {

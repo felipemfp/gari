@@ -14,10 +14,22 @@
         <p id="subtitle" class="muted">Loading…</p>
       </div>
       <div class="actions">
+        <button id="report-btn" title="Measure where the space goes on Windows and WSL (read-only)">Report</button>
         <button id="scan" class="primary">Scan</button>
         <button id="clean" disabled>Clean selected</button>
       </div>
     </header>
+
+    <section id="report" aria-label="Disk report" hidden>
+      <div class="report-head">
+        <h2>Disk report</h2>
+        <span id="report-when" class="muted"></span>
+      </div>
+      <div id="kpis" class="kpis"></div>
+      <h3>Recommendations</h3>
+      <ol id="recs" class="recs"></ol>
+      <div id="report-details"></div>
+    </section>
 
     <section id="categories" aria-label="What to clean"></section>
 

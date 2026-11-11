@@ -21,6 +21,15 @@ pub enum Event {
         category: String,
         message: String,
     },
+    /// Report: one measurement. `data` is section-specific and passed through to the UI.
+    Stat {
+        category: String,
+        section: String,
+        label: String,
+        bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<serde_json::Value>,
+    },
     /// End of a step. `error` is set when the step failed as a whole.
     Done {
         category: String,
@@ -145,6 +154,30 @@ mod tests {
                 r#"{"event":"item","category":"c","path":"p","bytes":-1}"#
             ))
         );
+    }
+
+    #[test]
+    fn stat_keeps_its_data_and_null_data_is_none() {
+        let e = parse_line(
+            "report-win",
+            r#"{"event":"stat","category":"report-win","section":"vhdx","label":"Ubuntu","bytes":5,"data":{"sparse":true,"used":null}}"#,
+        );
+        assert_eq!(
+            e,
+            Some(Event::Stat {
+                category: "report-win".into(),
+                section: "vhdx".into(),
+                label: "Ubuntu".into(),
+                bytes: 5,
+                data: Some(serde_json::json!({"sparse": true, "used": null})),
+            })
+        );
+        // gari.sh prints "data":null when a stat has nothing extra.
+        let e = parse_line(
+            "report-wsl",
+            r#"{"event":"stat","category":"report-wsl","section":"wsl-home","label":"/h/.cache","bytes":1,"data":null}"#,
+        );
+        assert!(matches!(e, Some(Event::Stat { data: None, .. })));
     }
 
     #[test]

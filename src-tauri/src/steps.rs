@@ -59,7 +59,7 @@ pub fn run(cat: Category, mode: Mode, env: &Env, scanned: &[String], emit: &mut 
     };
     match cat.runner() {
         Runner::Wsl => stream(
-            wsl_command(env, mode, cat, list.as_deref()),
+            wsl_command(env, &step_args(mode, cat, list.as_deref())),
             Some(GARI_SH.as_bytes()),
             cat.id(),
             emit,
@@ -84,8 +84,123 @@ pub fn run(cat: Category, mode: Mode, env: &Env, scanned: &[String], emit: &mut 
                 cat.id(),
                 emit,
             ),
-            Mode::Clean => elevated(env, "compact", list.as_deref(), cat.id(), emit),
+            Mode::Clean => match list {
+                Some(l) => compact(env, &l, emit),
+                None => emit(Event::failed(cat.id(), "no clean list")),
+            },
         },
+    }
+}
+
+/// Disk compaction in two stages, reported as one step (one `done`):
+/// 1. unelevated trim: fstrim inside the distros. A sparse disk gives space back
+///    right there, no admin, no shutdown. It writes the disks still worth a full
+///    compaction to `compact-list.txt`.
+/// 2. elevated compact of only those, if any. If the trim stage itself fails,
+///    stage 2 falls back to the whole scanned list (the old behaviour).
+pub fn compact(env: &Env, scanned_list: &Path, emit: &mut dyn FnMut(Event)) {
+    let cat = Category::Vhdx.id();
+    let follow_up = env.data_dir.join("compact-list.txt");
+    let _ = std::fs::remove_file(&follow_up);
+    let mut merge = Merge::default();
+    let mut trim_error = None;
+    powershell(
+        env,
+        &[
+            "-Mode",
+            "trim",
+            "-Distro",
+            &env.distro,
+            "-List",
+            &scanned_list.display().to_string(),
+            "-Out",
+            &follow_up.display().to_string(),
+        ],
+        cat,
+        &mut |e| match e {
+            Event::Done {
+                error: Some(err), ..
+            } => trim_error = Some(err),
+            Event::Done { .. } => {}
+            other => emit(merge.track(other)),
+        },
+    );
+    let (next, switch): (&Path, Option<&str>) = match &trim_error {
+        Some(err) => {
+            emit(Event::log(
+                cat,
+                format!("trim failed ({err}); compacting the scanned non-sparse disks"),
+            ));
+            // A sparse disk's gap was never measured: not worth un-sparsing blind.
+            (scanned_list, Some("NonSparseOnly"))
+        }
+        None => {
+            let todo = std::fs::read_to_string(&follow_up).unwrap_or_default();
+            if !lists_any_disk(&todo) {
+                return emit(merge.done(cat, None));
+            }
+            (&follow_up, None)
+        }
+    };
+    elevated(env, "compact", Some(next), switch, cat, &mut |e| match e {
+        Event::Done { error, .. } => emit(merge.done(cat, error)),
+        other => emit(merge.track(other)),
+    });
+}
+
+/// Does the trim stage's follow-up list name any disk? A BOM (Windows
+/// PowerShell 5.1 writes one with -Encoding utf8) is not a disk: `str::trim`
+/// keeps U+FEFF, and a stray one meant a needless UAC prompt.
+fn lists_any_disk(text: &str) -> bool {
+    text.lines().any(|l| {
+        !l.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+            .is_empty()
+    })
+}
+
+/// Folds the removed events of several stages into one total: bytes add up,
+/// a disk counts once however many stages shrank it.
+#[derive(Default)]
+struct Merge {
+    bytes: u64,
+    paths: std::collections::BTreeSet<String>,
+}
+
+impl Merge {
+    fn track(&mut self, e: Event) -> Event {
+        if let Event::Removed { path, bytes, .. } = &e {
+            self.bytes += bytes;
+            self.paths.insert(path.clone());
+        }
+        e
+    }
+
+    fn done(&self, cat: &str, error: Option<String>) -> Event {
+        Event::Done {
+            category: cat.into(),
+            bytes: self.bytes,
+            count: self.paths.len() as u64,
+            error,
+        }
+    }
+}
+
+/// Read-only disk report: the WSL side, then the Windows side. Each ends with
+/// its own `done` (categories `report-wsl` and `report-win`).
+pub fn report(env: &Env, side: &str, emit: &mut dyn FnMut(Event)) {
+    match side {
+        "report-wsl" => stream(
+            wsl_command(env, &["report"]),
+            Some(GARI_SH.as_bytes()),
+            side,
+            emit,
+        ),
+        _ => powershell(
+            env,
+            &["-Mode", "report", "-Distro", &env.distro],
+            side,
+            emit,
+        ),
     }
 }
 
@@ -101,10 +216,20 @@ pub fn write_list(env: &Env, cat: Category, paths: &[String]) -> std::io::Result
 
 /// One-time switch so the distro's vhdx gives space back on its own.
 pub fn enable_sparse(env: &Env, emit: &mut dyn FnMut(Event)) {
-    elevated(env, "sparse", None, Category::Vhdx.id(), emit)
+    elevated(env, "sparse", None, None, Category::Vhdx.id(), emit)
 }
 
-fn wsl_command(env: &Env, mode: Mode, cat: Category, list: Option<&Path>) -> Command {
+/// gari.sh arguments for one category step. The list is a Windows path; the
+/// script converts it with wslpath.
+fn step_args(mode: Mode, cat: Category, list: Option<&Path>) -> Vec<String> {
+    let mut a = vec![mode.as_str().to_string(), cat.id().to_string()];
+    if let Some(l) = list {
+        a.push(list_arg(l));
+    }
+    a
+}
+
+fn wsl_command<S: AsRef<std::ffi::OsStr>>(env: &Env, args: &[S]) -> Command {
     // Off Windows (development inside WSL) the script runs directly.
     let mut c = if cfg!(windows) {
         let mut c = Command::new("wsl.exe");
@@ -115,11 +240,7 @@ fn wsl_command(env: &Env, mode: Mode, cat: Category, list: Option<&Path>) -> Com
     } else {
         Command::new("env")
     };
-    c.args(["bash", "-s", "--", mode.as_str(), cat.id()]);
-    // A Windows path; the script converts it with wslpath.
-    if let Some(l) = list {
-        c.arg(list_arg(l));
-    }
+    c.args(["bash", "-s", "--"]).args(args);
     c
 }
 
@@ -180,6 +301,7 @@ pub fn elevated_args(
     distro: &str,
     log: &Path,
     list: Option<&Path>,
+    switch: Option<&str>,
 ) -> String {
     let mut inner = format!(
         "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\" -Mode {} -Distro \"{}\" -Log \"{}\"",
@@ -193,6 +315,9 @@ pub fn elevated_args(
     if let Some(l) = list {
         inner.push_str(&format!(" -List \"{}\"", l.display()));
     }
+    if let Some(s) = switch {
+        inner.push_str(&format!(" -{s}"));
+    }
     format!(
         "Start-Process -FilePath powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList {}",
         ps_quote(&inner)
@@ -203,6 +328,7 @@ fn elevated(
     env: &Env,
     mode: &str,
     list: Option<&Path>,
+    switch: Option<&str>,
     category: &str,
     emit: &mut dyn FnMut(Event),
 ) {
@@ -220,7 +346,7 @@ fn elevated(
     c.args([
         "-NoProfile",
         "-Command",
-        &elevated_args(&ps1, mode, &env.distro, &log, list),
+        &elevated_args(&ps1, mode, &env.distro, &log, list, switch),
     ]);
     crate::proc::hide(&mut c);
     let mut child = match c.spawn() {
@@ -261,14 +387,19 @@ mod tests {
     #[test]
     fn list_path_is_passed_with_forward_slashes() {
         assert_eq!(
-            list_arg(Path::new(r"C:\Users\Jane Doe\AppData\Local\gari\clean-caches.txt")),
+            list_arg(Path::new(
+                r"C:\Users\Jane Doe\AppData\Local\gari\clean-caches.txt"
+            )),
             "C:/Users/Jane Doe/AppData/Local/gari/clean-caches.txt"
         );
     }
 
     #[test]
     fn embedded_bash_script_has_lf_endings() {
-        assert!(!GARI_SH.contains('\r'), "scripts/gari.sh must be LF (see .gitattributes)");
+        assert!(
+            !GARI_SH.contains('\r'),
+            "scripts/gari.sh must be LF (see .gitattributes)"
+        );
     }
 
     use super::*;
@@ -291,10 +422,28 @@ mod tests {
             Some(Path::new(
                 r"C:\Users\O'Brien Smith\AppData\Local\gari\clean-vhdx.txt",
             )),
+            None,
         );
         assert_eq!(
             a,
             r#"Start-Process -FilePath powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Users\O''Brien Smith\AppData\Local\gari\vhdx.ps1" -Mode compact -Distro "Ubuntu" -Log "C:\Users\O''Brien Smith\AppData\Local\gari\compact.log" -List "C:\Users\O''Brien Smith\AppData\Local\gari\clean-vhdx.txt"'"#
+        );
+    }
+
+    // The trim-failed fallback must reach the elevated script as a switch.
+    #[test]
+    fn elevated_args_pass_the_non_sparse_switch() {
+        let a = elevated_args(
+            Path::new(r"C:\g\vhdx.ps1"),
+            "compact",
+            "Ubuntu",
+            Path::new(r"C:\g\compact.log"),
+            Some(Path::new(r"C:\g\clean-vhdx.txt")),
+            Some("NonSparseOnly"),
+        );
+        assert!(
+            a.ends_with(r#"-List "C:\g\clean-vhdx.txt" -NonSparseOnly'"#),
+            "{a}"
         );
     }
 
@@ -349,7 +498,7 @@ mod tests {
         // The child inherits these; HOME isolates the real caches from the test.
         let e = env(t.path());
         let list = write_list(&e, Category::Caches, &[ws.display().to_string()]).unwrap();
-        let mut c = wsl_command(&e, Mode::Clean, Category::Caches, Some(&list));
+        let mut c = wsl_command(&e, &step_args(Mode::Clean, Category::Caches, Some(&list)));
         c.env("HOME", t.path())
             .env("GARI_ROOT", t.path().join("ws"));
         let mut ev = vec![];
@@ -358,6 +507,92 @@ mod tests {
         assert!(
             matches!(ev.last(), Some(Event::Done { count: 1, error: None, bytes, .. }) if *bytes >= 4096)
         );
+    }
+
+    fn removed(path: &str, bytes: u64) -> Event {
+        Event::Removed {
+            category: "vhdx".into(),
+            path: path.into(),
+            bytes,
+        }
+    }
+
+    // Regression: an empty follow-up list written by PS 5.1 is BOM + CRLF, and
+    // was read as "one disk to compact", so every trim ended in a UAC prompt.
+    #[test]
+    fn follow_up_list_with_only_bom_and_blank_lines_names_no_disk() {
+        assert!(!lists_any_disk("\u{feff}\r\n"));
+        assert!(!lists_any_disk(""));
+        assert!(!lists_any_disk("\n \r\n"));
+        assert!(lists_any_disk("\u{feff}C:\\u\\ext4.vhdx\r\n"));
+    }
+
+    // Trim then compact can both shrink one disk: freed bytes add up, the disk
+    // counts once, and the run reports a single done for the vhdx step.
+    #[test]
+    fn merge_sums_bytes_and_counts_each_disk_once() {
+        let mut m = Merge::default();
+        m.track(removed(r"C:\u.vhdx", 3));
+        m.track(removed(r"C:\u.vhdx", 10));
+        m.track(removed(r"C:\d.vhdx", 5));
+        m.track(Event::log("vhdx", "noise"));
+        assert_eq!(
+            m.done("vhdx", None),
+            Event::Done {
+                category: "vhdx".into(),
+                bytes: 18,
+                count: 2,
+                error: None
+            }
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn compaction_off_windows_ends_in_exactly_one_failed_done() {
+        let t = tempfile::tempdir().unwrap();
+        let e = env(t.path());
+        let list = write_list(&e, Category::Vhdx, &[r"C:\x.vhdx".into()]).unwrap();
+        let mut ev = vec![];
+        run(
+            Category::Vhdx,
+            Mode::Clean,
+            &e,
+            &[r"C:\x.vhdx".into()],
+            &mut |x| ev.push(x),
+        );
+        let dones: Vec<_> = ev
+            .iter()
+            .filter(|x| matches!(x, Event::Done { .. }))
+            .collect();
+        assert_eq!(dones.len(), 1, "{ev:?}");
+        assert!(matches!(dones[0], Event::Done { error: Some(_), .. }));
+        assert!(list.exists());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn wsl_report_streams_stats_and_one_done() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join(".cache/pip")).unwrap();
+        std::fs::write(t.path().join(".cache/pip/blob"), vec![0u8; 8192]).unwrap();
+        let e = env(t.path());
+        let mut c = wsl_command(&e, &["report"]);
+        c.env("HOME", t.path())
+            .env("GARI_ROOT", t.path().join("ws"))
+            .env("GARI_DOCKER", "false");
+        let mut ev = vec![];
+        stream(c, Some(GARI_SH.as_bytes()), "report-wsl", &mut |x| {
+            ev.push(x)
+        });
+        assert!(ev.iter().any(|x| matches!(x,
+            Event::Stat { section, bytes, .. } if section == "clean-caches" && *bytes >= 8192)));
+        let dones = ev
+            .iter()
+            .filter(|x| matches!(x, Event::Done { .. }))
+            .count();
+        assert_eq!(dones, 1, "{ev:?}");
+        assert!(matches!(ev.last(), Some(Event::Done { error: None, .. })));
     }
 
     #[cfg(not(windows))]
