@@ -59,7 +59,8 @@ jobs:
           $out
           $done = @($out | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.event -eq 'done' })
           if ($done.Count -ne 1) { throw "trim: expected one done event, got $($done.Count)" }
-          if ((Get-Content -Raw $o).Trim()) { throw 'trim without a list must not ask for compaction' }
+          if (-not (Test-Path $o)) { throw 'trim wrote no follow-up list' }
+          if ([IO.File]::ReadAllText($o).Trim()) { throw 'trim without a list must not ask for compaction' }
           # report: parses, ends in one done, every line is JSON.
           $out = powershell -NoProfile -ExecutionPolicy Bypass -File scripts\vhdx.ps1 -Mode report -Distro NoSuchDistro
           $ev = @($out | ForEach-Object { $_ | ConvertFrom-Json })

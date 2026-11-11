@@ -50,6 +50,21 @@ try {
   Check 'length still reports 64 MB' ((Get-Item $f).Length) 64MB
 } finally { Remove-Item $f -ErrorAction SilentlyContinue }
 
+# Regression: log events written from inside a function became its return value.
+$Distro = 'NoSuchDistro'; $Log = $null
+$prevLad = $env:LOCALAPPDATA; $env:LOCALAPPDATA = Join-Path ([IO.Path]::GetTempPath()) "gari-empty-$PID"
+try {
+  Check 'no disks found: Get-Targets returns nothing, not a log line' (@(Get-Targets).Count) 0
+} finally { $env:LOCALAPPDATA = $prevLad }
+$sv = Join-Path ([IO.Path]::GetTempPath()) "gari-room-$PID.vhdx"
+try {
+  New-Item -ItemType File -Path $sv -Force | Out-Null
+  fsutil sparse setflag $sv | Out-Null
+  $fs = [IO.File]::Open($sv, 'Open', 'ReadWrite'); $fs.SetLength(15TB); $fs.Close()
+  $r = Test-CanUnsparse $sv
+  Check 'no room: Test-CanUnsparse returns exactly $false (no leaked log line)' ($r -is [bool] -and -not $r) $true
+} finally { Remove-Item $sv -ErrorAction SilentlyContinue }
+
 # Compact guards, end to end. Both must stop before Docker or WSL is touched.
 function Invoke-CompactLog($list, [switch]$NonSparse) {
   $log = Join-Path ([IO.Path]::GetTempPath()) "gari-c-$PID.log"

@@ -52,7 +52,10 @@ function Invoke-Native([scriptblock]$cmd) {
 
 function Out-Event($obj) {
   $line = $obj | ConvertTo-Json -Compress -Depth 5
-  if ($Log) { Add-Content -LiteralPath $Log -Value $line -Encoding utf8 } else { Write-Output $line }
+  # Straight to stdout, never Write-Output: inside a function, Write-Output becomes
+  # part of its return value (Get-Targets returned a log line as a "disk", and
+  # Test-CanUnsparse returned @(line, $false), which is truthy).
+  if ($Log) { Add-Content -LiteralPath $Log -Value $line -Encoding utf8 } else { [Console]::Out.WriteLine($line) }
 }
 function Out-Log($msg) { Out-Event ([ordered]@{ event = 'log'; category = 'vhdx'; message = $msg }) }
 
